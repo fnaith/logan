@@ -1,12 +1,14 @@
-grepnumlines: 250
-searchbeforecontext: 2
-searchaftercontext: 2
+grepnumlines: 300
+searchbeforecontext: 5
+searchaftercontext: 5
+tailnumlines: 200
+headnumlines: 200
 
 extensions:
- - log
+  - log
 
 directories:
- - /var/log
+  - /var/log
 
 logfiles:
 #  - /home/user/userlog.log
