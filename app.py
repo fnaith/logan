@@ -1,10 +1,12 @@
 import os.path
-import yaml
-import glob
-import tailer
-import grin
 import re
-import uuid
+from collections import deque
+from glob import glob
+from io import StringIO
+from uuid import uuid1
+from yaml import full_load
+
+import tailer
 from flask import Flask, render_template
 from flask import request, session
 from flask import make_response
@@ -13,7 +15,6 @@ from flask import make_response
     Logan log file viewer
 
     Simple log service agent to provide tailing (tailer) and
-    grep (grin) services over REST
 
     FIXME: No results found for expression
 
@@ -21,7 +22,7 @@ from flask import make_response
     :license: BSD-2, see LICENSE_FILE for more details.
 """
 app = Flask(__name__)
-app.secret_key = str(uuid.uuid1())
+app.secret_key = str(uuid1())
 
 configurationfile = 'logagentconfig.yaml'
 
@@ -30,7 +31,7 @@ def init():
   configfile = open(configurationfile, 'r', encoding='utf-8', errors='ignore')
   config = {}
   try:
-    config = yaml.full_load(configfile)
+    config = full_load(configfile)
     for item in config:
       print('%s: %s' % (item, str(config[item])))
   finally:
@@ -51,7 +52,7 @@ def process_path(validfiles, path):
   # Generate URLs
   if os.path.getsize(path) > 0:
     size = str(os.path.getsize(path))
-    uniquefilename = '%s_%s' % (filename, str(uuid.uuid1()))
+    uniquefilename = '%s_%s' % (filename, str(uuid1()))
     validfiles[uniquefilename] = [path, size]
 
 def process_file(fn, filename, numlines):
@@ -73,8 +74,8 @@ def process_file(fn, filename, numlines):
     session['content'] = 'Refusing to process file'
     return resp
 
-def has_config(conf, field):
-  return field in conf and conf[field]
+def get_config(conf, field, default):
+  return default if not (field in conf and conf[field]) else conf[field]
 
 def cast_int(v, default):
   try:
@@ -82,36 +83,58 @@ def cast_int(v, default):
   except ValueError:
     return default
 
-def search_for_expression(output, filepaths, validfiles, expression, grepbefore, grepafter):
+def search_for_expression(filepaths, validfiles, expression, grepbefore, grepafter):
   """Carry out search for expression (using grep context) on validfiles returning matching files as output"""
-  options = grin.Options()
-  options['before_context'] = cast_int(grepbefore, config['searchbeforecontext'])
-  options['after_context'] = cast_int(grepafter, config['searchaftercontext'])
-  options['use_color'] = False
-  options['show_filename'] = False
-  options['show_match'] = True
-  options['show_emacs'] = False
-  options['show_line_numbers'] = True
+  before_context = cast_int(grepbefore, config['searchbeforecontext'])
+  after_context = cast_int(grepafter, config['searchaftercontext'])
 
   anchorcount = 1
-
   searchregexp = re.compile(expression)
-  grindef = grin.GrepText(searchregexp, options)
+  highlight = r'<span class="highlightmatch">\g<0></span>'
+  sb = StringIO()
 
   for file in validfiles:
     filepath = validfiles.get(file)[0]
-    report = grindef.grep_a_file(filepath)
-    if report:
-      output += '<a name="filename%d"></a><h2>%s</h2>' % (anchorcount, filepath)
+    with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+      q = deque(maxlen=max(before_context, after_context))
+      lines = []
+      line_no = 0
+      last_matched_line_no = 0
+      for line in f:
+        line_no += 1
+        if line and '\n' == line[-1]:
+          line = line[:-1]
+        if re.search(searchregexp, line):
+          if 0 < last_matched_line_no and line_no - 1 <= last_matched_line_no + after_context:
+            size = line_no - 1 - last_matched_line_no
+            for i in range(size):
+              lines.append('line %d + %s<br>' % (last_matched_line_no + i + 1, q[-(size - i)]))
+            q.clear()
+          else:
+            size = min(before_context, len(q))
+            for i in range(size):
+              lines.append('line %d - %s<br>' % (line_no - size + i, q[-(size - i)]))
+            q.clear()
+          lines.append('line %d : %s<br>' % (line_no, searchregexp.sub(highlight, line)))
+          last_matched_line_no = line_no
+        else:
+          q.append(line)
+          if 0 < last_matched_line_no and last_matched_line_no + after_context == line_no:
+            for i in range(after_context):
+              lines.append('line %d + %s<br>' % (last_matched_line_no + i + 1, q[-(after_context - i)]))
+            q.clear()
+      if 0 < last_matched_line_no and q and line_no - 1 <= last_matched_line_no + after_context:
+        for i in range(len(q)):
+          lines.append('line %d + %s<br>' % (last_matched_line_no + i + 1, q[i]))
+        q.clear()
+      if lines:
+        sb.write('<a name="filename%d"></a><h2>%s</h2>' % (anchorcount, filepath))
+        filepaths.append(filepath)
+        for line in lines:
+          sb.write(line)
+    anchorcount += 1
 
-      filepaths.append(filepath)
-      reporttext = report.split("\n")
-      for text in reporttext:
-        if text:
-          output += 'line%s<br>' % (text)
-      anchorcount += 1
-
-  return output
+  return sb.getvalue()
 
 @app.route('/')
 def index():
@@ -125,27 +148,23 @@ def list_files():
   validfiles = {}
 
   # Filter log files for dirs specified in the config
-  if has_config(config, 'directories'):
-    for dir_path in config['directories']:
-      if has_config(config, 'extensions'):
-        for ext in config['extensions']:
-          # Glob for all files matching the ones specified in the conig
-          paths = glob.glob('%s/*.%s' % (dir_path, ext))
-          for path in paths:
-            path = path.replace("\\","/")
-            process_path(validfiles, path)
+  for dir_path in get_config(config, 'directories', []):
+    for ext in get_config(config, 'extensions', []):
+      # Glob for all files matching the ones specified in the conig
+      paths = glob('%s/*.%s' % (dir_path, ext))
+      for path in paths:
+        path = path.replace('\\', '/')
+        process_path(validfiles, path)
 
   # Filter log files for files explicitly specified in the config
-  if has_config(config, 'logfiles'):
-    for file in config['logfiles']:
-      process_path(validfiles, file)
+  for file in get_config(config, 'logfiles', []):
+    process_path(validfiles, file)
 
   # Filter log files for globs specified in the config
-  if has_config(config, 'logfile_glob'):
-    for item in config['logfile_glob']:
-      filelist = glob.glob(item)
-      for file in filelist:
-        process_path(validfiles, file)
+  for item in get_config(config, 'logfile_glob', []):
+    filelist = glob(item)
+    for file in filelist:
+      process_path(validfiles, file)
 
   session['grepnumlines'] = str(config['grepnumlines'])
   session['searchbeforecontext'] = str(config['searchbeforecontext'])
@@ -176,19 +195,14 @@ def grep():
     return render_template('list.html', error='no search expression specified')
 
   expression = request.form['expression'].strip()
-  output = ''
   filepaths = []
 
-  output += search_for_expression(output, filepaths, session.get('validfiles'), expression, request.form['grepbefore'], request.form['grepafter'])
+  output = search_for_expression(filepaths, session.get('validfiles'), expression, request.form['grepbefore'], request.form['grepafter'])
 
   if not output:
     return render_template('list.html', error='No results found for search expression')
 
-  highlight = r'<span class="highlightmatch">\g<0></span>'
-  searchregexp = re.compile(expression)
-  highlightedoutput = searchregexp.sub(highlight, output)
-
-  return render_template('results.html', output=highlightedoutput, filepaths=filepaths, expression=expression)
+  return render_template('results.html', output=output, filepaths=filepaths, expression=expression)
 
 if __name__ == '__main__':
   app.run()
