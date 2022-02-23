@@ -83,18 +83,21 @@ def cast_int(v, default):
   except ValueError:
     return default
 
-def search_for_expression(filepaths, validfiles, expression, grepbefore, grepafter):
+def search_for_expression(filepaths, validfiles, expression, grepbefore, grepafter, logfileexpression):
   """Carry out search for expression (using grep context) on validfiles returning matching files as output"""
   before_context = cast_int(grepbefore, config['searchbeforecontext'])
   after_context = cast_int(grepafter, config['searchaftercontext'])
 
   anchorcount = 1
   searchregexp = re.compile(expression)
+  logfileregexp = re.compile(logfileexpression)
   highlight = r'<span class="highlightmatch">\g<0></span>'
   sb = StringIO()
 
   for file in validfiles:
     filepath = validfiles.get(file)[0]
+    if logfileexpression and not re.search(logfileregexp, filepath):
+      continue
     with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
       q = deque(maxlen=max(before_context, after_context))
       lines = []
@@ -195,9 +198,10 @@ def grep():
     return render_template('list.html', error='no search expression specified')
 
   expression = request.form['expression'].strip()
+  logfileexpression = request.form['logfileexpression'].strip()
   filepaths = []
 
-  output = search_for_expression(filepaths, session.get('validfiles'), expression, request.form['grepbefore'], request.form['grepafter'])
+  output = search_for_expression(filepaths, session.get('validfiles'), expression, request.form['grepbefore'], request.form['grepafter'], logfileexpression)
 
   if not output:
     return render_template('list.html', error='No results found for search expression')

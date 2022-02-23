@@ -7,8 +7,10 @@
     <input name="grepafter" type="text" class="searchnumfield" value="{{ session['searchaftercontext'] }}"/>
   </p>
 
-  Search logs for:   
+  Search logs :   
   <input name="expression" type="text" class="searchfield"/>
+  with log file filter :
+  <input name="logfileexpression" type="text" class="searchfield" value=""/>
   <input type="submit" value="Search" class="searchbutton"/>
   <input type="button" value="Reset Form" onClick="this.form.reset()" />
   
